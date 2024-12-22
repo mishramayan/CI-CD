@@ -1,0 +1,14 @@
+# Use a base image with TensorFlow 2.17.0 (CPU version)
+FROM tensorflow/tensorflow:2.17.0
+
+# Set the working directory inside the container
+WORKDIR /workspace
+
+# copy onnx files and other required files to the container
+COPY mnist_train.py .
+COPY requirements.txt .
+
+# Install other python libs for the actual model training itself
+RUN pip install -r requirements.txt --user
+
+ENTRYPOINT ["bash", "-c", "python mnist_train.py > /workspace/model_training_output.txt 2>&1; exec bash"]

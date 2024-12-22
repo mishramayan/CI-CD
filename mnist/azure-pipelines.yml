@@ -1,0 +1,145 @@
+name: mnist_tf
+
+pr:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - mnist/**
+
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - mnist/**
+
+pool:
+  name: linux
+  demands: Agent.Name -equals oai-ml
+
+variables:
+  dockerRepoName: "oai-tf"
+  customSourcesDirectory: $(Build.BuildId)
+
+stages:
+  - stage: Build
+    jobs:
+      - job: BuildDockerImage
+        displayName: 'Build Docker Image'
+        steps:
+          - checkout: self
+            path: $(customSourcesDirectory)
+          - script: |
+              cd $(Pipeline.Workspace)/$(customSourcesDirectory)
+
+              DOCKER_HASH=$(git log -1 --format=%h --max-count=1 Dockerfile)
+              if [[ -z "$(docker images -q $(dockerRepoName):$DOCKER_HASH 2>/dev/null)" ]]; then
+                docker build \
+                  -t $(dockerRepoName):$DOCKER_HASH \
+                  -t $(dockerRepoName):latest \
+                  -f Dockerfile .
+              else
+                echo "Docker image $(dockerRepoName):$DOCKER_HASH already exists. Skipping build."
+              fi
+            displayName: 'Build Docker Image'
+
+  - stage: ConvertModel
+    displayName: "Train and Quantize Model"
+    dependsOn: Build
+    jobs:
+      - job: TrainModel
+        displayName: 'Train and Quantize the Model'
+        condition: succeeded()
+        steps:
+          - checkout: none
+          - script: |
+              commit_hash=$(git rev-parse HEAD)
+              cd $(Pipeline.Workspace)/$(customSourcesDirectory)
+              export MLFLOW_PIPELINE_RUN_BY=$(Build.RequestedForEmail)
+              export MLFLOW_PIPELINE_BUILD_ID=$(Build.BuildId) 
+              docker run --rm \
+                    -u $(id -u):$(id -g) \
+                    -v $(pwd)/mnist:/workspace \
+                    $(env | grep MLFLOW | cut -f1 \
+                    -d= | sed 's/^/-e /') \
+                    $(dockerRepoName):latest \
+                    python mnist_training.py
+            env:
+              MLFLOW_TRACKING_PASSWORD: $(MLFLOW_TRACKING_PASSWORD)
+              MLFLOW_RUN_NAME: $(MLFLOW_RUN_NAME)
+            displayName: 'Run Training Script'
+          - script: |
+              cd $(Pipeline.Workspace)/$(customSourcesDirectory)
+              docker run --rm \
+                    -v $(pwd)/mnist:/workspace \
+                    $(dockerRepoName):latest \
+                    python mnist_quant.py
+            displayName: 'Run Quantization Script'  
+
+  - stage: Upload
+    dependsOn: ConvertModel
+    condition: succeeded()
+    jobs:
+      - job: UploadArtifacts
+        displayName: 'Upload Artifacts'
+        steps:
+          - checkout: none
+          - script: |
+              cd $(Pipeline.Workspace)/$(customSourcesDirectory)/mnist
+              mkdir -p output
+              echo "Uploading artifacts..."
+              cp SDK_code/app_algo.cc output/
+              echo "Artifacts uploaded."
+            displayName: "Copy app_algo to output"
+          - publish: "$(Pipeline.Workspace)/$(customSourcesDirectory)/mnist/output"
+            artifact: output
+            displayName: 'Upload output directory'
+
+  - stage: Cleanup
+    dependsOn: Upload
+    condition: always()
+    jobs:
+      - job: CleanupBuildEnvironment
+        displayName: 'Cleanup Build Environment'
+        variables:
+          CURRENT_BUILD_PATH: $(Pipeline.Workspace)/$(customSourcesDirectory)
+        steps:
+          - checkout: none
+          - script: |
+              cd $CURRENT_BUILD_PATH
+              DOCKER_HASH=$(git log -1 --format=%h --max-count=1 Dockerfile)
+              docker images $(dockerRepoName) --format "{{.Repository}}:{{.Tag}}" | grep -v "$DOCKER_HASH" | grep -v "latest" | xargs -I {} docker rmi {}
+            displayName: 'Remove Old Docker Images'
+          - script: |
+              echo "Cleaning up build environment..."
+              cd $(Pipeline.Workspace)
+              rm -rf $CURRENT_BUILD_PATH
+            displayName: 'Remove Build Directory'
+
+  - stage: Publish
+    displayName: "Publish"
+    dependsOn: Upload
+    condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
+    jobs:
+      - deployment: PublishModel
+        environment: "PublishModel"
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: none
+                - download: current
+                  artifact: "output"
+                  patterns: |
+                    **/*.cc
+                  displayName: "Download model"
+                - publish: $(Pipeline.Workspace)/output
+                  artifact: model
+                  displayName: "Publish model"
+                - script: |
+                    rm -rf $(Pipeline.Workspace)/output
+                  displayName: "Cleanup Downloaded Artifacts"
+
