@@ -30,7 +30,7 @@ def log_to_mlflow(model, x_train, x_test, y_train, y_test, tflite_model, num_cla
     # Start an MLflow run and set run name from environment variable
     with mlflow.start_run(run_name=os.getenv("MLFLOW_RUN_NAME"), experiment_id=experiment_id) as run:
         # Set user tags
-        mlflow.set_tag("build_id", os.getenv("MLFLOW_PIPELINE_BUILD_ID", "local"))
+        mlflow.set_tag("build_id", os.getenv("MLFLOW_PIPELINE_BUILD_ID", "local_run"))
         mlflow.set_tag("run_by", os.getenv("MLFLOW_PIPELINE_RUN_BY", os.getenv("MLFLOW_TRACKING_USERNAME")))
         
         # Log parameters
